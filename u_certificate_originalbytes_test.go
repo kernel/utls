@@ -3,7 +3,10 @@ package tls
 import (
 	"bytes"
 	"crypto/sha256"
+	"crypto/x509"
+	"os"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/cryptobyte"
 )
@@ -78,5 +81,49 @@ func TestCertificateMsgTLS13PreservesOriginalBytes(t *testing.T) {
 	want := sha256.Sum256(wire)
 	if got := h.Sum(nil); !bytes.Equal(got, want[:]) {
 		t.Fatal("transcriptMsg hashed the re-marshal instead of the original wire bytes")
+	}
+}
+
+func TestCertificateVerifyWithUnknownCertificateEntryExtension(t *testing.T) {
+	// The recorded server flight contains an unknown extension on the leaf
+	// CertificateEntry and a CertificateVerify signature over those exact bytes.
+	fixture, err := os.Open("testdata/Client-TLSv13-CertificateEntryUnknownExtension")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fixture.Close()
+
+	flows, err := parseTestData(fixture)
+	if err != nil {
+		t.Fatalf("parse fixture: %v", err)
+	}
+
+	root, err := x509.ParseCertificate(testRSACertificateIssuer)
+	if err != nil {
+		t.Fatalf("parse root certificate: %v", err)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(root)
+
+	config := testConfig.Clone()
+	config.MinVersion = VersionTLS13
+	config.MaxVersion = VersionTLS13
+	config.InsecureSkipVerify = false
+	config.RootCAs = roots
+	config.ServerName = "example.golang"
+	config.Time = func() time.Time { return time.Unix(1_600_000_000, 0) }
+
+	client := UClient(&replayingConn{t: t, flows: flows}, config, HelloGolang)
+	if err := client.Handshake(); err != nil {
+		t.Fatalf("handshake: %v", err)
+	}
+	if state := client.ConnectionState(); state.Version != VersionTLS13 {
+		t.Fatalf("negotiated TLS version %x, want %x", state.Version, VersionTLS13)
+	}
+	if _, err := client.Write([]byte("hello\n")); err != nil {
+		t.Fatalf("write application data: %v", err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("close: %v", err)
 	}
 }
